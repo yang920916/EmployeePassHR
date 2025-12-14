@@ -1,0 +1,45 @@
+# ===== Xcode / Swift =====
+.DS_Store
+build/
+DerivedData/
+*.xcuserstate
+*.xcuserdata/
+*.moved-aside
+*.xccheckout
+*.xcscmblueprint
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+*.swp
+
+# SwiftPM
+.build/
+Package.resolved
+
+# CocoaPods / Carthage（若你有用）
+Pods/
+Carthage/Build/
+
+# ===== Python / FastAPI =====
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+
+# venv / env
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# ===== DB / local data =====
+*.sqlite
+*.sqlite3
+
+# ===== IDE =====
+.vscode/
+.idea/
+

@@ -1,0 +1,19 @@
+:root{
+  --glass: rgba(255,255,255,0.06);
+  --stroke: rgba(255,255,255,0.14);
+}
+.glass-card{
+  background: var(--glass) !important;
+  border: 1px solid var(--stroke) !important;
+  border-radius: 18px;
+  box-shadow: 0 12px 30px rgba(0,0,0,0.35);
+}
+.table-dark{
+  --bs-table-bg: rgba(255,255,255,0.03);
+  --bs-table-striped-bg: rgba(255,255,255,0.05);
+  --bs-table-hover-bg: rgba(255,255,255,0.06);
+}
+.badge-soft-danger{ background: rgba(255,0,0,0.18); border: 1px solid rgba(255,0,0,0.28); }
+.badge-soft-warn{ background: rgba(255,193,7,0.18); border: 1px solid rgba(255,193,7,0.28); }
+.badge-soft-ok{ background: rgba(25,135,84,0.18); border: 1px solid rgba(25,135,84,0.28); }
+.wage-input{ max-width: 110px; }
