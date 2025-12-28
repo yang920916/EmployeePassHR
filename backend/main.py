@@ -5,7 +5,9 @@ from datetime import datetime, timedelta, timezone
 from math import radians, sin, cos, asin, sqrt
 from typing import Optional, List, Dict, Any
 from collections import defaultdict
-
+from io import BytesIO
+from fastapi import Query
+from fastapi.responses import Response, HTMLResponse
 from fastapi import FastAPI, Depends, HTTPException, Header, Query
 from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,8 +28,8 @@ JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "120"))
 QR_SHARED_SECRET = os.getenv("QR_SHARED_SECRET", "qr_demo_secret")
 
 # 公司位置（預設台北 101 附近）
-OFFICE_LAT = float(os.getenv("OFFICE_LAT", "25.033964"))
-OFFICE_LNG = float(os.getenv("OFFICE_LNG", "121.564468"))
+OFFICE_LAT = float(os.getenv("OFFICE_LAT", "24.17893"))
+OFFICE_LNG = float(os.getenv("OFFICE_LNG", "120.64996"))
 OFFICE_RADIUS_M = float(os.getenv("OFFICE_RADIUS_M", "200"))  # 打卡半徑 200 公尺內
 
 connect_args: Dict[str, Any] = {}
@@ -222,6 +224,12 @@ def get_db():
 
 @app.on_event("startup")
 def on_startup():
+    # 1. 開啟 SQLite WAL 模式 (大幅提升讀寫並發速度)
+    if DATABASE_URL.startswith("sqlite"):
+        with engine.connect() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL;"))
+            conn.execute(text("PRAGMA synchronous=NORMAL;")) # 選用，可犧牲一點點安全性換取更高速度
+            
     init_db()
 
 # ================== Pydantic models ==================
@@ -784,6 +792,34 @@ def _calc_work_minutes_for_day(items: list[tuple[datetime, str]], day_start_utc:
             minutes += int((end - last_in).total_seconds() // 60)
 
     return max(minutes, 0)
+def admin_get_user_timelogs(
+    user_id: int,
+    limit: int = 50,
+    admin=Depends(require_admin),
+    db=Depends(get_db),
+):
+    # 查詢指定使用者的打卡紀錄
+    rows = db.execute(
+        text("""
+            SELECT id, ts, type, lat, lng
+            FROM timelogs
+            WHERE user_id = :uid
+            ORDER BY ts DESC
+            LIMIT :limit
+        """),
+        {"uid": user_id, "limit": limit},
+    ).mappings().all()
+
+    return [
+        TimelogOut(
+            id=r["id"],
+            ts=r["ts"],
+            type=r["type"],
+            lat=r["lat"],
+            lng=r["lng"],
+        )
+        for r in rows
+    ]
 
 
 class UpdateHourlyRateIn(BaseModel):
@@ -1567,10 +1603,6 @@ def admin_web_payroll():
           <tbody id="tbodyPayroll"><tr><td colspan="13" class="text-center text-secondary py-4">載入中…</td></tr></tbody>
         </table>
       </div>
-    </div>
-    <div id="err" class="alert alert-danger mt-3 d-none"></div>
-    <div class="mt-3 small text-secondary">加班倍率 OVERTIME_MULTIPLIER：目前後端設定為 {OVERTIME_MULTIPLIER}</div>
-  </div>
   <script src="/admin-web/static/admin.js"></script>
 </body></html>"""
 
@@ -1598,20 +1630,51 @@ def _check_qr_web_key(key: str | None):
             raise HTTPException(status_code=403, detail="QR Web key invalid")
 
 
+try:
+    import qrcode
+except Exception:
+    qrcode = None
+
+
+@app.get("/qr/public/png")
+def qr_public_png(key: str | None = Query(default=None)):
+    # 若你有設定 QR_WEB_KEY，這裡會做權限檢查；沒設定就直接放行
+    _check_qr_web_key(key)
+
+    if qrcode is None:
+        raise HTTPException(
+            status_code=500,
+            detail="qrcode 套件未安裝，請先執行：pip install qrcode[pil] pillow"
+        )
+
+    data = generate_qr_payload(minutes_valid=5)  # 產生 payload（5 分鐘有效）
+    payload = data.get("payload")
+    if not payload:
+        raise HTTPException(status_code=500, detail="QR payload 產生失敗")
+
+    img = qrcode.make(payload)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
 @app.get("/qr/public/issue")
 def qr_public_issue(key: str | None = Query(default=None)):
     _check_qr_web_key(key)
-    # 產生 5 分鐘有效的 QR payload（內容是字串，前端用 JS 轉成 QR 圖）
+    # 這個 generate_qr_payload 你在 /qr/public/png 應該已經有用到
     return generate_qr_payload(minutes_valid=5)
+
 
 
 @app.get("/qr-web", response_class=HTMLResponse)
 def qr_web_page(key: str | None = Query(default=None)):
     _check_qr_web_key(key)
-    # 用前端 JS 產生 QR（避免伺服器端多裝 qrcode 套件）
-    # 預設每 60 秒刷新一次，確保 payload 常新
-    safe_key_qs = f"?key={key}" if (QR_WEB_KEY and key) else ""
-    html = f"""
+
+    html = """
 <!doctype html>
 <html lang="zh-Hant">
 <head>
@@ -1619,12 +1682,11 @@ def qr_web_page(key: str | None = Query(default=None)):
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>員工通｜打卡 QR Code</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
   <style>
-    body {{ background:#0b1220; color:#e5e7eb; }}
-    .cardx {{ background: rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.14); border-radius:18px; }}
-    .muted {{ color: rgba(229,231,235,0.7); }}
-    canvas {{ width: 320px !important; height: 320px !important; }}
+    body { background:#0b1220; color:#e5e7eb; }
+    .cardx { background: rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.14); border-radius:18px; }
+    .muted { color: rgba(229,231,235,0.7); }
+    #qrImg { width: 320px; height: 320px; object-fit: contain; }
   </style>
 </head>
 <body>
@@ -1643,7 +1705,7 @@ def qr_web_page(key: str | None = Query(default=None)):
     <div class="row g-3">
       <div class="col-12 col-lg-6">
         <div class="cardx p-4 text-center">
-          <canvas id="qrCanvas"></canvas>
+          <img id="qrImg" alt="QR Code"/>
           <div class="mt-3 small muted">每 <span id="refreshSec">60</span> 秒自動刷新</div>
           <div id="err" class="alert alert-danger mt-3 d-none"></div>
         </div>
@@ -1654,69 +1716,68 @@ def qr_web_page(key: str | None = Query(default=None)):
           <ul class="muted">
             <li>此頁建議在公司桌機/前台螢幕顯示。</li>
             <li>若手機掃不到：請確認 App 的 baseURL 指向此後端（例如 Mac 的區網 IP）。</li>
-            <li>若你設定了 QR_WEB_KEY，請使用 /qr-web?key=你的key 開啟。</li>
           </ul>
-          <div class="small muted">
-            API：<code>/qr/public/issue{safe_key_qs}</code>
-          </div>
         </div>
       </div>
     </div>
   </div>
 
-  <script>
-    const refreshEvery = 60; // seconds
-    document.getElementById("refreshSec").textContent = String(refreshEvery);
+    <script>
+    const refreshEvery = 60;
 
-    function showErr(msg) {{
+    function buildUrl(path) {
+      const params = new URLSearchParams(location.search);
+      const key = params.get("key");
+      if (key) return path + "?key=" + encodeURIComponent(key);
+      return path;
+    }
+
+    function showErr(msg) {
       const el = document.getElementById("err");
       el.textContent = msg;
       el.classList.remove("d-none");
-    }}
-    function clearErr() {{
+    }
+    function clearErr() {
       document.getElementById("err").classList.add("d-none");
-    }}
+    }
 
-    async function refreshQR() {{
-      try {{
-        clearErr();
-        const resp = await fetch("/qr/public/issue{safe_key_qs}");
-        if(!resp.ok) {{
-          const t = await resp.text();
-          throw new Error(t || String(resp.status));
-        }}
+    async function refreshQR() {
+      clearErr();
+
+      // ✅ 先更新圖片（不管 issue 成不成功，至少 QR 圖會出來）
+      const pngBase = buildUrl("/qr/public/png");
+      const joiner = pngBase.includes("?") ? "&" : "?";
+      document.getElementById("qrImg").src = pngBase + joiner + "t=" + Date.now();
+
+      // 再抓 JSON 來顯示 exp（失敗也不要影響顯示）
+      try {
+        const issueUrl = buildUrl("/qr/public/issue");
+        const resp = await fetch(issueUrl);
+        if (!resp.ok) throw new Error(await resp.text());
         const data = await resp.json();
-        // data: {{payload, exp, ...}}
-        const payload = data.payload || data.qr_payload || data.data || "";
-        if(!payload) throw new Error("沒有取得 payload");
 
-        const canvas = document.getElementById("qrCanvas");
-        await QRCode.toCanvas(canvas, payload, {{
-          errorCorrectionLevel: "M",
-          margin: 2,
-          width: 360
-        }});
-
-        const now = new Date();
-        document.getElementById("serverTime").textContent = now.toLocaleString();
-        if (data.exp) {{
+        document.getElementById("serverTime").textContent = new Date().toLocaleString();
+        if (data.exp) {
           const exp = new Date(data.exp * 1000);
           document.getElementById("expTime").textContent = exp.toLocaleString();
-        }} else {{
+        } else {
           document.getElementById("expTime").textContent = "-";
-        }}
-      }} catch (e) {{
-        showErr("載入 QR 失敗：" + (e.message || String(e)));
-      }}
-    }}
+        }
+      } catch (e) {
+        // 只顯示警告，不阻擋 QR 圖
+        showErr("提示：exp 資訊取得失敗（但 QR 仍可掃）：" + (e.message || String(e)));
+      }
+    }
 
     refreshQR();
     setInterval(refreshQR, refreshEvery * 1000);
   </script>
+
 </body>
 </html>
     """
     return HTMLResponse(html)
+
 
 
 # 舊名稱相容（如果你以前用 /qr 顯示頁）
