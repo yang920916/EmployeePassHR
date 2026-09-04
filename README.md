@@ -21,8 +21,6 @@ EmployeePassHR 是一套以企業員工出勤管理為核心所開發的行動�
 
 # System Preview
 
-> 此區可放置完整系統展示圖，讓瀏覽者第一眼了解系統實際成果。
-
 ## iOS Employee Application
 
 <!--
